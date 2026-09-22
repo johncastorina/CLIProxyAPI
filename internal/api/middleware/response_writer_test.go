@@ -2,9 +2,6 @@ package middleware
 
 import (
 	"bytes"
-	"context"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -206,98 +203,6 @@ func (w *testStreamingLogWriter) Close() error {
 	return nil
 }
 
-func TestHasActionableError(t *testing.T) {
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	tests := []struct {
-		name       string
-		statusCode int
-		ctx        context.Context
-		apiErrors  []*interfaces.ErrorMessage
-		want       bool
-	}{
-		{
-			name:       "200 ok without errors",
-			statusCode: http.StatusOK,
-			want:       false,
-		},
-		{
-			name:       "499 client closed request",
-			statusCode: clienterror.StatusClientClosedRequest,
-			want:       false,
-		},
-		{
-			name:       "499 with context canceled api error",
-			statusCode: clienterror.StatusClientClosedRequest,
-			apiErrors:  []*interfaces.ErrorMessage{{StatusCode: clienterror.StatusClientClosedRequest, Error: context.Canceled}},
-			want:       false,
-		},
-		{
-			name:       "200 with canceled context",
-			statusCode: http.StatusOK,
-			ctx:        canceledCtx,
-			want:       false,
-		},
-		{
-			name:       "0 with canceled context",
-			statusCode: 0,
-			ctx:        canceledCtx,
-			want:       false,
-		},
-		{
-			name:       "400 bad request",
-			statusCode: http.StatusBadRequest,
-			want:       true,
-		},
-		{
-			name:       "429 rate limit",
-			statusCode: http.StatusTooManyRequests,
-			want:       true,
-		},
-		{
-			name:       "500 internal server error",
-			statusCode: http.StatusInternalServerError,
-			want:       true,
-		},
-		{
-			name:       "503 with canceled context",
-			statusCode: http.StatusServiceUnavailable,
-			ctx:        canceledCtx,
-			want:       true,
-		},
-		{
-			name:       "200 with actionable upstream api error",
-			statusCode: http.StatusOK,
-			apiErrors:  []*interfaces.ErrorMessage{{StatusCode: http.StatusBadGateway, Error: errors.New("upstream failed")}},
-			want:       true,
-		},
-		{
-			name:       "200 with non-actionable cancellation api error",
-			statusCode: http.StatusOK,
-			apiErrors:  []*interfaces.ErrorMessage{{StatusCode: 0, Error: fmt.Errorf("read: %w", context.Canceled)}},
-			want:       false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-			if tc.ctx != nil {
-				req = req.WithContext(tc.ctx)
-			}
-			c.Request = req
-
-			got := hasActionableError(c, tc.statusCode, tc.apiErrors)
-			if got != tc.want {
-				t.Fatalf("hasActionableError(status=%d, errors=%v) = %t, want %t", tc.statusCode, tc.apiErrors, got, tc.want)
-			}
-		})
-	}
-}
-
 type recordingRequestLogger struct {
 	loggedCalls []int
 	enabled     bool
@@ -333,7 +238,6 @@ func TestFinalizeExcludes499FromForceLog(t *testing.T) {
 	wrapper := &ResponseWriterWrapper{
 		ResponseWriter: c.Writer,
 		logger:         logger,
-		logOnErrorOnly: true,
 		statusCode:     clienterror.StatusClientClosedRequest,
 		requestInfo: &RequestInfo{
 			URL:       "/v1/responses",
@@ -351,7 +255,7 @@ func TestFinalizeExcludes499FromForceLog(t *testing.T) {
 	}
 }
 
-func TestFinalizeIncludes500InForceLog(t *testing.T) {
+func TestFinalizeDoesNotForceLog500WhenRequestLoggingDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -361,7 +265,6 @@ func TestFinalizeIncludes500InForceLog(t *testing.T) {
 	wrapper := &ResponseWriterWrapper{
 		ResponseWriter: c.Writer,
 		logger:         logger,
-		logOnErrorOnly: true,
 		statusCode:     http.StatusInternalServerError,
 		requestInfo: &RequestInfo{
 			URL:       "/v1/responses",
@@ -374,7 +277,7 @@ func TestFinalizeIncludes500InForceLog(t *testing.T) {
 	if err := wrapper.Finalize(c); err != nil {
 		t.Fatalf("Finalize error: %v", err)
 	}
-	if len(logger.loggedCalls) != 1 || logger.loggedCalls[0] != http.StatusInternalServerError {
-		t.Fatalf("expected 1 logged call for 500 status, got: %v", logger.loggedCalls)
+	if len(logger.loggedCalls) != 0 {
+		t.Fatalf("expected 0 logged calls when request logging is disabled, got: %v", logger.loggedCalls)
 	}
 }

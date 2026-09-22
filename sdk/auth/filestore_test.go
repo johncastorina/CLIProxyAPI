@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -143,6 +144,71 @@ func TestFileTokenStoreSaveExistingMetadataSetsFileAttributes(t *testing.T) {
 				t.Errorf("saved auth file = %s, want JSON equal to %s", persisted, expected)
 			}
 		})
+	}
+}
+
+func TestFileTokenStoreSaveTightensExistingMetadataFilePermissions(t *testing.T) {
+	baseDir := t.TempDir()
+	fileName := "credential.json"
+	path := filepath.Join(baseDir, fileName)
+	if errWrite := os.WriteFile(path, []byte(`{"type":"codex","access_token":"old"}`), 0o644); errWrite != nil {
+		t.Fatalf("write existing auth file: %v", errWrite)
+	}
+	if errChmod := os.Chmod(path, 0o644); errChmod != nil {
+		t.Fatalf("chmod existing auth file: %v", errChmod)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Metadata: map[string]any{"type": "codex", "access_token": "new"},
+	}
+	if _, errSave := store.Save(context.Background(), auth); errSave != nil {
+		t.Fatalf("Save() error = %v", errSave)
+	}
+
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		t.Fatalf("stat auth file: %v", errStat)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("auth file permissions = %04o, want 0600", got)
+	}
+}
+
+func TestFileTokenStoreSaveRejectsSymlinkDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows test hosts")
+	}
+	baseDir := t.TempDir()
+	targetPath := filepath.Join(baseDir, "target.json")
+	linkPath := filepath.Join(baseDir, "credential.json")
+	original := []byte(`{"access_token":"original"}`)
+	if errWrite := os.WriteFile(targetPath, original, 0o600); errWrite != nil {
+		t.Fatalf("write target: %v", errWrite)
+	}
+	if errLink := os.Symlink(targetPath, linkPath); errLink != nil {
+		t.Fatalf("create symlink: %v", errLink)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auth := &cliproxyauth.Auth{
+		ID:       "credential.json",
+		FileName: "credential.json",
+		Metadata: map[string]any{"type": "codex", "access_token": "replacement"},
+	}
+	if _, errSave := store.Save(context.Background(), auth); errSave == nil {
+		t.Fatal("Save() accepted a symlink destination")
+	}
+	got, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("read target: %v", errRead)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("symlink target changed to %q, want %q", got, original)
 	}
 }
 

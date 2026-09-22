@@ -43,31 +43,49 @@ func TestRequestLoggingDoesNotMarkUpstreamAttempt(t *testing.T) {
 	}
 }
 
-func TestRecordAPIRequestClonesDeferredBodyWhenRequestLogDisabled(t *testing.T) {
+func TestRecordAPIRequestDoesNotCaptureWhenRequestLogDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ctx := context.WithValue(context.Background(), "gin", ginCtx)
-	body := []byte(`{"model":"original"}`)
 
 	RecordAPIRequest(ctx, &config.Config{}, UpstreamRequestLog{
 		URL:    "https://api.example.com/v1/responses",
 		Method: http.MethodPost,
-		Body:   body,
+		Body:   []byte(`{"model":"must-not-be-captured"}`),
 	})
-	body[10] = 'X'
 
-	value, exists := ginCtx.Get(logging.DeferredAPIRequestContextKey)
+	for _, key := range []string{
+		"DEFERRED_API_REQUEST",
+		"DEFERRED_API_REQUEST_BYTES",
+		apiAttemptsKey,
+		apiRequestKey,
+	} {
+		if value, exists := ginCtx.Get(key); exists {
+			t.Fatalf("context key %q = %#v, want absent", key, value)
+		}
+	}
+}
+
+func TestRecordAPIRequestCapturesWhenRequestLogEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	RecordAPIRequest(ctx, &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}, UpstreamRequestLog{
+		URL:    "https://api.example.com/v1/responses",
+		Method: http.MethodPost,
+		Body:   []byte(`{"model":"captured"}`),
+	})
+
+	value, exists := ginCtx.Get(apiRequestKey)
 	if !exists {
-		t.Fatal("deferred API request was not captured")
+		t.Fatal("API request was not captured")
 	}
-	requests, ok := value.([]logging.DeferredAPIRequest)
-	if !ok || len(requests) != 1 {
-		t.Fatalf("deferred API requests = %#v, want one request", value)
-	}
-	captured := string(requests[0]())
-	if !strings.Contains(captured, `{"model":"original"}`) {
-		t.Fatalf("captured API request = %q, want original body", captured)
+	captured, ok := value.([]byte)
+	if !ok || !strings.Contains(string(captured), `{"model":"captured"}`) {
+		t.Fatalf("captured API request = %#v, want request body", value)
 	}
 }
 

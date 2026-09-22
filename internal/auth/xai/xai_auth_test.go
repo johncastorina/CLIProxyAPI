@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,31 @@ import (
 
 	"golang.org/x/sync/singleflight"
 )
+
+type xaiRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn xaiRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+const testAllowedTokenEndpoint = "https://auth.x.ai/oauth2/token"
+
+func xaiTestClientForServer(t *testing.T, server *httptest.Server) *http.Client {
+	t.Helper()
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := server.Client().Transport
+	return &http.Client{Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		clone := req.Clone(req.Context())
+		requestURL := *req.URL
+		requestURL.Scheme = target.Scheme
+		requestURL.Host = target.Host
+		clone.URL = &requestURL
+		return transport.RoundTrip(clone)
+	})}
+}
 
 func resetXAIRefreshGroupForTest() {
 	xaiRefreshGroup = singleflight.Group{}
@@ -29,6 +55,17 @@ func TestValidateOAuthEndpointRejectsNonXAIOrigin(t *testing.T) {
 	}
 	if _, err := ValidateOAuthEndpoint("https://evil.example/oauth/token", "token_endpoint"); err == nil {
 		t.Fatal("expected non-xAI endpoint to be rejected")
+	}
+}
+
+func TestValidateOAuthEndpointRejectsURLUserinfoWithoutEchoingSecrets(t *testing.T) {
+	rawURL := "https://client:super-secret@auth.x.ai/oauth2/token?credential=query-secret"
+	_, err := ValidateOAuthEndpoint(rawURL, "token_endpoint")
+	if err == nil {
+		t.Fatal("expected endpoint containing userinfo to be rejected")
+	}
+	if strings.Contains(err.Error(), "super-secret") || strings.Contains(err.Error(), "query-secret") {
+		t.Fatalf("validation error exposed URL credentials: %v", err)
 	}
 }
 
@@ -168,6 +205,42 @@ func TestPollForTokenAccessDenied(t *testing.T) {
 	}
 }
 
+func TestPollForTokenDoesNotForwardDeviceCodeAcrossRedirect(t *testing.T) {
+	var redirectedCalls atomic.Int32
+	auth := &XAIAuth{
+		httpClient: &http.Client{Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host == "evil.example" {
+				redirectedCalls.Add(1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":"stolen"}`)),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Header:     http.Header{"Location": []string{"https://evil.example/capture"}},
+				Body:       io.NopCloser(strings.NewReader("redirecting")),
+				Request:    req,
+			}, nil
+		})},
+		minPollInterval: time.Millisecond,
+	}
+
+	_, err := auth.PollForToken(t.Context(), &DeviceCodeResponse{
+		DeviceCode:    "secret-device-code",
+		ExpiresIn:     1,
+		TokenEndpoint: testAllowedTokenEndpoint,
+	})
+	if err == nil {
+		t.Fatal("expected redirected device token exchange to fail")
+	}
+	if got := redirectedCalls.Load(); got != 0 {
+		t.Fatalf("redirect target calls = %d, want 0", got)
+	}
+}
+
 func TestPollForTokenSlowDownContinuesPolling(t *testing.T) {
 	var pollCount int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -241,8 +314,8 @@ func TestRefreshTokensPostsClientIDAndRefreshToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	auth := NewXAIAuth(nil)
-	tokenData, err := auth.RefreshTokens(context.Background(), "old-refresh", server.URL)
+	auth := &XAIAuth{httpClient: xaiTestClientForServer(t, server)}
+	tokenData, err := auth.RefreshTokens(context.Background(), "old-refresh", testAllowedTokenEndpoint)
 	if err != nil {
 		t.Fatalf("RefreshTokens() error = %v", err)
 	}
@@ -257,6 +330,56 @@ func TestRefreshTokensPostsClientIDAndRefreshToken(t *testing.T) {
 	}
 	if gotForm.Get("refresh_token") != "old-refresh" {
 		t.Fatalf("refresh_token = %q, want old-refresh", gotForm.Get("refresh_token"))
+	}
+}
+
+func TestRefreshTokensRejectsUntrustedStoredEndpointBeforeTransport(t *testing.T) {
+	var calls atomic.Int32
+	auth := &XAIAuth{httpClient: &http.Client{Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"access_token":"stolen"}`)),
+			Request:    req,
+		}, nil
+	})}}
+
+	_, err := auth.RefreshTokens(t.Context(), "fake-refresh-token", "https://evil.example/oauth/token")
+	if err == nil {
+		t.Fatal("expected untrusted stored token endpoint to be rejected")
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("transport calls = %d, want 0", got)
+	}
+}
+
+func TestRefreshTokensDoesNotForwardRefreshTokenAcrossRedirect(t *testing.T) {
+	var redirectedCalls atomic.Int32
+	auth := &XAIAuth{httpClient: &http.Client{Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host == "evil.example" {
+			redirectedCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"access_token":"stolen"}`)),
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusTemporaryRedirect,
+			Header:     http.Header{"Location": []string{"https://evil.example/capture"}},
+			Body:       io.NopCloser(strings.NewReader("redirecting")),
+			Request:    req,
+		}, nil
+	})}}
+
+	_, err := auth.RefreshTokens(t.Context(), "redirect-refresh-token", "https://auth.x.ai/oauth2/token")
+	if err == nil {
+		t.Fatal("expected redirected token refresh to fail")
+	}
+	if got := redirectedCalls.Load(); got != 0 {
+		t.Fatalf("redirect target calls = %d, want 0", got)
 	}
 }
 
@@ -283,15 +406,15 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}))
 	defer server.Close()
 
-	authA := NewXAIAuth(nil)
-	authB := NewXAIAuth(nil)
+	authA := &XAIAuth{httpClient: xaiTestClientForServer(t, server)}
+	authB := &XAIAuth{httpClient: xaiTestClientForServer(t, server)}
 	results := make(chan *TokenData, 2)
 	errs := make(chan error, 2)
 	runRefresh := func(auth *XAIAuth, launched chan<- struct{}) {
 		if launched != nil {
 			close(launched)
 		}
-		tokenData, errRefresh := auth.RefreshTokens(context.Background(), "shared-refresh-token", server.URL)
+		tokenData, errRefresh := auth.RefreshTokens(context.Background(), "shared-refresh-token", testAllowedTokenEndpoint)
 		results <- tokenData
 		errs <- errRefresh
 	}

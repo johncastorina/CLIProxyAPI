@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	runtimehelps "github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -669,6 +670,28 @@ func TestHealthz(t *testing.T) {
 			t.Fatalf("expected empty body for HEAD request, got %q", rr.Body.String())
 		}
 	})
+}
+
+func TestNewServerDoesNotTrustForwardedHeadersByDefault(t *testing.T) {
+	server := newTestServerWithOptions(t, WithRouterConfigurator(func(engine *gin.Engine, _ *handlers.BaseAPIHandler, _ *proxyconfig.Config) {
+		engine.GET("/test-client-ip", func(c *gin.Context) {
+			c.String(http.StatusOK, c.ClientIP())
+		})
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/test-client-ip", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	req.Header.Set("X-Real-IP", "127.0.0.1")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if got := rr.Body.String(); got != "192.0.2.10" {
+		t.Fatalf("ClientIP() = %q, want socket peer", got)
+	}
 }
 
 func TestHealthzAccessLogging(t *testing.T) {
@@ -2565,7 +2588,7 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 
 	cfg := &proxyconfig.Config{
 		SDKConfig: proxyconfig.SDKConfig{
-			RequestLog: false,
+			RequestLog: true,
 		},
 		AuthDir:           authDir,
 		ErrorLogsMaxFiles: 10,
@@ -2577,7 +2600,7 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		t.Fatalf("expected *FileRequestLogger, got %T", logger)
 	}
 
-	errLog := fileLogger.LogRequestWithOptions(
+	errLog := fileLogger.LogRequest(
 		"/v1/chat/completions",
 		http.MethodPost,
 		map[string][]string{"Content-Type": []string{"application/json"}},
@@ -2590,13 +2613,12 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		nil,
 		nil,
 		nil,
-		true,
 		"issue-1711",
 		time.Now(),
 		time.Now(),
 	)
 	if errLog != nil {
-		t.Fatalf("failed to write forced error request log: %v", errLog)
+		t.Fatalf("failed to write request log: %v", errLog)
 	}
 
 	authLogsDir := filepath.Join(authDir, "logs")
@@ -2604,15 +2626,15 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	if errReadAuthDir != nil {
 		t.Fatalf("failed to read auth logs dir %s: %v", authLogsDir, errReadAuthDir)
 	}
-	foundErrorLogInAuthDir := false
+	foundRequestLogInAuthDir := false
 	for _, entry := range authEntries {
-		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
-			foundErrorLogInAuthDir = true
+		if strings.HasSuffix(entry.Name(), ".log") {
+			foundRequestLogInAuthDir = true
 			break
 		}
 	}
-	if !foundErrorLogInAuthDir {
-		t.Fatalf("expected forced error log in auth fallback dir %s, got entries: %+v", authLogsDir, authEntries)
+	if !foundRequestLogInAuthDir {
+		t.Fatalf("expected request log in auth fallback dir %s, got entries: %+v", authLogsDir, authEntries)
 	}
 
 	configLogsDir := filepath.Join(configDir, "logs")
@@ -2621,8 +2643,8 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		t.Fatalf("failed to inspect config logs dir %s: %v", configLogsDir, errReadConfigDir)
 	}
 	for _, entry := range configEntries {
-		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
-			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
+		if strings.HasSuffix(entry.Name(), ".log") {
+			t.Fatalf("unexpected request log in config dir %s", configLogsDir)
 		}
 	}
 }

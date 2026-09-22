@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/privatefile"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 )
@@ -131,8 +132,11 @@ var metaCredentialFields = map[string]struct{}{
 func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 	ts.Type = "meta"
 	ts.AuthKind = "oauth"
-	if errMkdirAll := os.MkdirAll(filepath.Dir(authFilePath), 0o700); errMkdirAll != nil {
+	if errMkdirAll := privatefile.MkdirAll(filepath.Dir(authFilePath)); errMkdirAll != nil {
 		return fmt.Errorf("meta token storage: create directory: %w", errMkdirAll)
+	}
+	if errPrepare := privatefile.PrepareExisting(authFilePath); errPrepare != nil {
+		return fmt.Errorf("meta token storage: prepare token file: %w", errPrepare)
 	}
 
 	data := map[string]any{

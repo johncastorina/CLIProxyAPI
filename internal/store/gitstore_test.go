@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,31 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestIsRepositoryCorruptionErrorClassifiesMissingPackfile(t *testing.T) {
+	missingPack := fmt.Errorf("packhandle: pack size: %w", &fs.PathError{
+		Op:   "statat",
+		Path: "objects/pack/pack-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack",
+		Err:  fs.ErrNotExist,
+	})
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "wrapped missing pack", err: missingPack, want: true},
+		{name: "ordinary missing file", err: &fs.PathError{Op: "open", Path: "config/config.yaml", Err: fs.ErrNotExist}, want: false},
+		{name: "pack permission error", err: &fs.PathError{Op: "open", Path: "objects/pack/pack-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack", Err: fs.ErrPermission}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isRepositoryCorruptionError(test.err); got != test.want {
+				t.Fatalf("isRepositoryCorruptionError() = %v, want %v for %v", got, test.want, test.err)
+			}
+		})
+	}
+}
 
 type testBranchSpec struct {
 	name     string
@@ -1798,13 +1825,14 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 	if errOpen != nil {
 		t.Fatalf("open repository before corruption: %v", errOpen)
 	}
-	defer func() {
-		if errClose := repo.Close(); errClose != nil {
-			t.Errorf("close corrupted repository: %v", errClose)
-		}
-	}()
 	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close repository after repack failure: %v", errClose)
+		}
 		t.Fatalf("repack repository objects: %v", errRepack)
+	}
+	if errClose := repo.Close(); errClose != nil {
+		t.Fatalf("close repository before corrupting packfiles: %v", errClose)
 	}
 	objectsDir := filepath.Join(repoDir, ".git", "objects")
 	objectEntries, errReadDir := os.ReadDir(objectsDir)
@@ -1830,7 +1858,16 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 			t.Fatalf("remove packfile %s: %v", filepath.Base(packfile), errRemove)
 		}
 	}
-	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
+	freshRepo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		t.Fatalf("reopen repository after corruption: %v", errOpen)
+	}
+	defer func() {
+		if errClose := freshRepo.Close(); errClose != nil {
+			t.Errorf("close freshly opened corrupted repository: %v", errClose)
+		}
+	}()
+	if errVerify := verifyRepositoryHead(freshRepo); !isRepositoryCorruptionError(errVerify) {
 		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
 	}
 }

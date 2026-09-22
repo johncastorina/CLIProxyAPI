@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/privatefile"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -104,7 +105,7 @@ func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
 		ts.BaseURL = ResolveKimiAPIBaseURL(ts.Domain)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
+	if err := privatefile.MkdirAll(filepath.Dir(authFilePath)); err != nil {
 		return fmt.Errorf("failed to create directory: %v", err)
 	}
 
@@ -114,7 +115,7 @@ func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("failed to merge metadata: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := privatefile.Open(authFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("failed to create token file: %w", err)
 	}

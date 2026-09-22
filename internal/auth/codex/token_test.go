@@ -75,3 +75,52 @@ func TestSaveTokenToFile_PreservesCustomMetadata(t *testing.T) {
 		t.Errorf("weight = %v, want 42", saved["weight"])
 	}
 }
+
+func TestSaveTokenToFileTightensExistingFilePermissions(t *testing.T) {
+	authFilePath := filepath.Join(t.TempDir(), "codex-test.json")
+	if errWrite := os.WriteFile(authFilePath, []byte(`{"access_token":"old"}`), 0o644); errWrite != nil {
+		t.Fatalf("write existing token file: %v", errWrite)
+	}
+	if errChmod := os.Chmod(authFilePath, 0o644); errChmod != nil {
+		t.Fatalf("chmod existing token file: %v", errChmod)
+	}
+
+	storage := &CodexTokenStorage{AccessToken: "new-access-token"}
+	if errSave := storage.SaveTokenToFile(authFilePath); errSave != nil {
+		t.Fatalf("SaveTokenToFile() error = %v", errSave)
+	}
+
+	info, errStat := os.Stat(authFilePath)
+	if errStat != nil {
+		t.Fatalf("stat token file: %v", errStat)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("token file permissions = %04o, want 0600", got)
+	}
+}
+
+func TestSaveTokenToFileCreatesPrivateFileAndDirectory(t *testing.T) {
+	baseDir := t.TempDir()
+	authDir := filepath.Join(baseDir, "auths")
+	authFilePath := filepath.Join(authDir, "codex-test.json")
+
+	storage := &CodexTokenStorage{AccessToken: "access-token"}
+	if errSave := storage.SaveTokenToFile(authFilePath); errSave != nil {
+		t.Fatalf("SaveTokenToFile() error = %v", errSave)
+	}
+
+	fileInfo, errStat := os.Stat(authFilePath)
+	if errStat != nil {
+		t.Fatalf("stat token file: %v", errStat)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Errorf("token file permissions = %04o, want 0600", got)
+	}
+	dirInfo, errStat := os.Stat(authDir)
+	if errStat != nil {
+		t.Fatalf("stat auth directory: %v", errStat)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Errorf("auth directory permissions = %04o, want 0700", got)
+	}
+}

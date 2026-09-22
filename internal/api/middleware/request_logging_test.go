@@ -108,21 +108,21 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 			want:          false,
 		},
 		{
-			name:          "small known size json in error-only mode",
+			name:          "disabled logger skips small known size json",
 			loggerEnabled: false,
 			req: &http.Request{
 				Body:          io.NopCloser(strings.NewReader("{}")),
 				ContentLength: 2,
 				Header:        http.Header{"Content-Type": []string{"application/json"}},
 			},
-			want: true,
+			want: false,
 		},
 		{
-			name:          "large known size skipped in error-only mode",
+			name:          "disabled logger skips large known size json",
 			loggerEnabled: false,
 			req: &http.Request{
 				Body:          io.NopCloser(strings.NewReader("x")),
-				ContentLength: maxErrorOnlyCapturedRequestBodyBytes + 1,
+				ContentLength: (1 << 20) + 1,
 				Header:        http.Header{"Content-Type": []string{"application/json"}},
 			},
 			want: false,
@@ -157,49 +157,12 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 	}
 }
 
-func TestDeferredRequestBodyCaptureDoesNotDrainUnreadBody(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	logger := logging.NewFileRequestLogger(false, t.TempDir(), "", 10)
-	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("remaining-body"))
-	request.ContentLength = -1
-	request.Header.Set("Content-Type", "application/json")
-	requestInfo := &RequestInfo{Headers: map[string][]string{"Content-Type": {"application/json"}}}
-	capture := attachDeferredRequestBodyCapture(request, logger, requestInfo, false, false)
-	if capture == nil {
-		t.Fatal("deferred request body capture was not attached")
-	}
-	defer capture.Cleanup()
-
-	firstByte := make([]byte, 1)
-	if _, errRead := request.Body.Read(firstByte); errRead != nil {
-		t.Fatalf("read first request byte: %v", errRead)
-	}
-	captured, marker, errCaptured := capture.Bytes()
-	if errCaptured != nil {
-		t.Fatalf("read captured body: %v", errCaptured)
-	}
-	if string(captured) != "r" {
-		t.Fatalf("captured body = %q, want %q", string(captured), "r")
-	}
-	if !strings.Contains(marker, "REQUEST BODY CAPTURE INCOMPLETE") {
-		t.Fatalf("capture marker = %q, want incomplete marker", marker)
-	}
-	remaining, errRemaining := io.ReadAll(capture.body)
-	if errRemaining != nil {
-		t.Fatalf("read remaining body: %v", errRemaining)
-	}
-	if string(remaining) != "emaining-body" {
-		t.Fatalf("remaining body = %q, want %q", string(remaining), "emaining-body")
-	}
-}
-
-func TestRequestLoggingMiddlewareCapturesLargeErrorRequestAndDeferredAPIRequest(t *testing.T) {
+func TestRequestLoggingMiddlewareDisabledDoesNotPersistLargeErrorRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	logsDir := t.TempDir()
 	logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
-	payload := append([]byte(`{"marker":"large-error-body","padding":"`), bytes.Repeat([]byte("x"), int(maxErrorOnlyCapturedRequestBodyBytes))...)
+	payload := append([]byte(`{"marker":"large-error-body","padding":"`), bytes.Repeat([]byte("x"), (1<<20)+1)...)
 	payload = append(payload, []byte(`"}`)...)
 	upstreamBody := []byte(`{"model":"upstream-model","input":"translated"}`)
 
@@ -237,28 +200,8 @@ func TestRequestLoggingMiddlewareCapturesLargeErrorRequestAndDeferredAPIRequest(
 	if errReadDir != nil {
 		t.Fatalf("read logs dir: %v", errReadDir)
 	}
-	var logPath string
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
-			logPath = logsDir + string(os.PathSeparator) + entry.Name()
-			break
-		}
-	}
-	if logPath == "" {
-		t.Fatal("forced error log was not created")
-	}
-	content, errReadLog := os.ReadFile(logPath)
-	if errReadLog != nil {
-		t.Fatalf("read error log: %v", errReadLog)
-	}
-	if !bytes.Contains(content, payload) {
-		t.Fatal("error log does not contain the complete large request body")
-	}
-	if !bytes.Contains(content, []byte("=== API REQUEST 1 ===")) {
-		t.Fatal("error log does not contain the deferred API request section")
-	}
-	if !bytes.Contains(content, upstreamBody) {
-		t.Fatal("error log does not contain the deferred upstream request body")
+	if len(entries) != 0 {
+		t.Fatalf("request-log=false persisted %d conversation log entries", len(entries))
 	}
 }
 
@@ -379,29 +322,6 @@ func cleanupFileBodySourcesFromContext(c *gin.Context) {
 	}
 }
 
-func TestDecodeCapturedRequestBodyForLogWithLimitTruncatesZstdExpansion(t *testing.T) {
-	payload := bytes.Repeat([]byte("x"), 1024)
-	var compressed bytes.Buffer
-	encoder, errNewWriter := zstd.NewWriter(&compressed)
-	if errNewWriter != nil {
-		t.Fatalf("zstd.NewWriter: %v", errNewWriter)
-	}
-	if _, errWrite := encoder.Write(payload); errWrite != nil {
-		t.Fatalf("zstd write: %v", errWrite)
-	}
-	if errClose := encoder.Close(); errClose != nil {
-		t.Fatalf("zstd close: %v", errClose)
-	}
-
-	decoded := decodeCapturedRequestBodyForLogWithLimit(compressed.Bytes(), "zstd", 64)
-	if len(decoded) > 128 {
-		t.Fatalf("limited decoded body length = %d, want bounded output", len(decoded))
-	}
-	if !bytes.Contains(decoded, []byte("DECOMPRESSED REQUEST BODY TRUNCATED")) {
-		t.Fatalf("decoded body = %q, want truncation marker", string(decoded))
-	}
-}
-
 func TestCaptureRequestInfoDecodesZstdRequestBodyForLog(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -501,7 +421,7 @@ func TestRequestLoggingMiddleware_ClientCancellationExclusion(t *testing.T) {
 		}
 	})
 
-	t.Run("400 bad request creates error log when request-log is false", func(t *testing.T) {
+	t.Run("400 bad request does not create error log when request-log is false", func(t *testing.T) {
 		logsDir := t.TempDir()
 		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
 
@@ -524,14 +444,8 @@ func TestRequestLoggingMiddleware_ClientCancellationExclusion(t *testing.T) {
 		if errRead != nil {
 			t.Fatalf("read logs dir: %v", errRead)
 		}
-		var errorLogCount int
-		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
-				errorLogCount++
-			}
-		}
-		if errorLogCount != 1 {
-			t.Fatalf("expected 1 error log file for 400 Bad Request, got %d", errorLogCount)
+		if len(entries) != 0 {
+			t.Fatalf("expected 0 conversation log files for 400 Bad Request, got %d", len(entries))
 		}
 	})
 
