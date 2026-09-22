@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,38 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
+
+type apiToolsRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn apiToolsRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func useAllowedXAITokenEndpoint(t *testing.T, server *httptest.Server) string {
+	t.Helper()
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTransport := http.DefaultTransport
+	serverTransport := server.Client().Transport
+	if serverTransport == nil {
+		serverTransport = oldTransport
+	}
+	http.DefaultTransport = apiToolsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "auth.x.ai" {
+			return oldTransport.RoundTrip(req)
+		}
+		clone := req.Clone(req.Context())
+		requestURL := *req.URL
+		requestURL.Scheme = target.Scheme
+		requestURL.Host = target.Host
+		clone.URL = &requestURL
+		return serverTransport.RoundTrip(clone)
+	})
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+	return "https://auth.x.ai/oauth2/token"
+}
 
 func TestAPICallUsesRequestProxyURL(t *testing.T) {
 	t.Parallel()
@@ -806,8 +839,6 @@ func TestAPICallReplacesXAIOAuthAccessToken(t *testing.T) {
 }
 
 func TestAPICallRefreshesExpiredXAIOAuthToken(t *testing.T) {
-	t.Parallel()
-
 	var refreshCalls atomic.Int32
 	var refreshMethod, refreshGrantType, refreshToken string
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -825,6 +856,7 @@ func TestAPICallRefreshesExpiredXAIOAuthToken(t *testing.T) {
 		})
 	}))
 	defer tokenServer.Close()
+	tokenEndpoint := useAllowedXAITokenEndpoint(t, tokenServer)
 
 	var receivedAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -850,7 +882,7 @@ func TestAPICallRefreshesExpiredXAIOAuthToken(t *testing.T) {
 			"auth_kind":      "oauth",
 			"access_token":   "xai-access-stale",
 			"refresh_token":  "xai-refresh-old",
-			"token_endpoint": tokenServer.URL,
+			"token_endpoint": tokenEndpoint,
 			"base_url":       "https://api.x.ai/v1",
 			"expired":        time.Now().Add(-time.Hour).Format(time.RFC3339),
 		},
@@ -1206,8 +1238,6 @@ func TestAPICallPrioritizesStorageAccessTokenOverMetadataIDToken(t *testing.T) {
 }
 
 func TestAPICallConcurrentXAITokenRefresh(t *testing.T) {
-	t.Parallel()
-
 	var refreshCount atomic.Int32
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		refreshCount.Add(1)
@@ -1220,6 +1250,7 @@ func TestAPICallConcurrentXAITokenRefresh(t *testing.T) {
 		})
 	}))
 	defer tokenServer.Close()
+	tokenEndpoint := useAllowedXAITokenEndpoint(t, tokenServer)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -1249,7 +1280,7 @@ func TestAPICallConcurrentXAITokenRefresh(t *testing.T) {
 			"auth_kind":      "oauth",
 			"access_token":   "xai-stale-concurrent",
 			"refresh_token":  "xai-refresh-shared",
-			"token_endpoint": tokenServer.URL,
+			"token_endpoint": tokenEndpoint,
 			"expired":        time.Now().Add(-time.Hour).Format(time.RFC3339),
 		},
 		Storage: &xaiauth.TokenStorage{
@@ -1257,7 +1288,7 @@ func TestAPICallConcurrentXAITokenRefresh(t *testing.T) {
 			AuthKind:      "oauth",
 			AccessToken:   "xai-stale-concurrent",
 			RefreshToken:  "xai-refresh-shared",
-			TokenEndpoint: tokenServer.URL,
+			TokenEndpoint: tokenEndpoint,
 			Expire:        time.Now().Add(-time.Hour).Format(time.RFC3339),
 		},
 	}
@@ -1366,8 +1397,6 @@ func TestAPICallReplacesXAIOAuthAccessTokenInData(t *testing.T) {
 }
 
 func TestAPICallRefreshesWhenOnlyIDTokenPresentWithRefreshToken(t *testing.T) {
-	t.Parallel()
-
 	var refreshCalls atomic.Int32
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		refreshCalls.Add(1)
@@ -1380,6 +1409,7 @@ func TestAPICallRefreshesWhenOnlyIDTokenPresentWithRefreshToken(t *testing.T) {
 		})
 	}))
 	defer tokenServer.Close()
+	tokenEndpoint := useAllowedXAITokenEndpoint(t, tokenServer)
 
 	var receivedAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1405,7 +1435,7 @@ func TestAPICallRefreshesWhenOnlyIDTokenPresentWithRefreshToken(t *testing.T) {
 			"auth_kind":      "oauth",
 			"id_token":       "xai-raw-id-token",
 			"refresh_token":  "xai-refresh-token",
-			"token_endpoint": tokenServer.URL,
+			"token_endpoint": tokenEndpoint,
 			"base_url":       "https://api.x.ai/v1",
 		},
 	}

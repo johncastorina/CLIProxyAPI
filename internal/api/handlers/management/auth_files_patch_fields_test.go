@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -597,6 +598,54 @@ func TestSetSourceAuthFileDisabledNormalizesLegacyMetadata(t *testing.T) {
 		if _, exists := persisted[legacy]; exists {
 			t.Fatalf("persisted metadata retained %q: %#v", legacy, persisted)
 		}
+	}
+}
+
+func TestSetSourceAuthFileDisabledTightensExistingFilePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credential.json")
+	if errWrite := os.WriteFile(path, []byte(`{"type":"codex","disabled":false}`), 0o644); errWrite != nil {
+		t.Fatalf("write auth file: %v", errWrite)
+	}
+	if errChmod := os.Chmod(path, 0o644); errChmod != nil {
+		t.Fatalf("chmod auth file: %v", errChmod)
+	}
+
+	if errDisable := setSourceAuthFileDisabled(path, true); errDisable != nil {
+		t.Fatalf("setSourceAuthFileDisabled() error = %v", errDisable)
+	}
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		t.Fatalf("stat auth file: %v", errStat)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("auth file permissions = %04o, want 0600", got)
+	}
+}
+
+func TestSetSourceAuthFileDisabledRejectsSymlinkDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows test hosts")
+	}
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "target.json")
+	linkPath := filepath.Join(dir, "credential.json")
+	original := []byte(`{"type":"codex","disabled":false}`)
+	if errWrite := os.WriteFile(targetPath, original, 0o600); errWrite != nil {
+		t.Fatalf("write symlink target: %v", errWrite)
+	}
+	if errLink := os.Symlink(targetPath, linkPath); errLink != nil {
+		t.Fatalf("create symlink: %v", errLink)
+	}
+
+	if errDisable := setSourceAuthFileDisabled(linkPath, true); errDisable == nil {
+		t.Fatal("setSourceAuthFileDisabled() accepted a symlink destination")
+	}
+	got, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("read symlink target: %v", errRead)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("symlink target changed to %q, want %q", got, original)
 	}
 }
 

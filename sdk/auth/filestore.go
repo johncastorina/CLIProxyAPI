@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/privatefile"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -101,8 +102,11 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err = privatefile.MkdirAll(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
+	}
+	if err = privatefile.PrepareExisting(path); err != nil {
+		return "", fmt.Errorf("auth filestore: prepare credential file failed: %w", err)
 	}
 
 	// metadataSetter is a private interface for TokenStorage implementations that support metadata injection.
@@ -132,7 +136,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			if jsonEqual(existing, raw) {
 				break
 			}
-			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+			file, errOpen := privatefile.Open(path, os.O_WRONLY|os.O_TRUNC)
 			if errOpen != nil {
 				return "", fmt.Errorf("auth filestore: open existing failed: %w", errOpen)
 			}
@@ -147,11 +151,14 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		} else if !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
-		if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+		if errWrite := privatefile.WriteFile(path, raw); errWrite != nil {
 			return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
 		}
 	default:
 		return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
+	}
+	if err = privatefile.PrepareExisting(path); err != nil {
+		return "", fmt.Errorf("auth filestore: secure credential file failed: %w", err)
 	}
 
 	if auth.Attributes == nil {

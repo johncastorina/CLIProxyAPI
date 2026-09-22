@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/privatefile"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -57,7 +58,7 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 	// Ensure we tag the file with the provider type.
 	s.Type = "vertex"
 
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0o700); err != nil {
+	if err := privatefile.MkdirAll(filepath.Dir(authFilePath)); err != nil {
 		return fmt.Errorf("vertex credential: create directory failed: %w", err)
 	}
 
@@ -66,7 +67,7 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("vertex credential: merge metadata failed: %w", errMerge)
 	}
 
-	f, err := os.Create(authFilePath)
+	f, err := privatefile.Open(authFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("vertex credential: create file failed: %w", err)
 	}

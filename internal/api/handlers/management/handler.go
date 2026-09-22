@@ -270,7 +270,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 		c.Header("X-CPA-SUPPORT-PLUGIN", pluginhost.SupportPluginHeaderValue())
 
-		clientIP := c.ClientIP()
+		clientIP := c.RemoteIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
 
 		// Accept either Authorization: Bearer <key> or X-Management-Key
@@ -364,7 +364,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		h.attemptsMu.Unlock()
 	}
 
-	if secretHash == "" && envSecret == "" {
+	if secretHash == "" && envSecret == "" && (!localClient || h.localPassword == "") {
 		return false, http.StatusForbidden, "remote management key not set"
 	}
 

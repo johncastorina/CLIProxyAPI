@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - fix/local-security-hardening
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.3
+          check-latest: false
+          cache: true
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Test
+        run: go test -timeout 120s ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -trimpath -o cli-proxy-api ./cmd/server
+
+      - name: Check built CLI
+        run: ./cli-proxy-api --help
+
+      - name: Validate local security smoke harness
+        run: python3 -m py_compile scripts/local-security-smoke.py
+
+      - name: Run local security smoke test
+        run: python3 scripts/local-security-smoke.py ./cli-proxy-api

@@ -20,13 +20,11 @@ import (
 )
 
 const (
-	apiAttemptsKey                 = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey                  = "API_REQUEST"
-	apiResponseKey                 = "API_RESPONSE"
-	apiWebsocketTimelineKey        = "API_WEBSOCKET_TIMELINE"
-	deferredAPIRequestBytesKey     = "DEFERRED_API_REQUEST_BYTES"
-	creditsUsedKey                 = "__antigravity_credits_used__"
-	maxDeferredAPIRequestBodyBytes = 32 << 20 // 32 MiB
+	apiAttemptsKey          = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey           = "API_REQUEST"
+	apiResponseKey          = "API_RESPONSE"
+	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
+	creditsUsedKey          = "__antigravity_credits_used__"
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -63,15 +61,11 @@ func requestLogCaptureEnabled(cfg *config.Config) bool {
 
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
-	if cfg == nil || cfg.CommercialMode {
+	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
-		return
-	}
-	if !cfg.RequestLog {
-		deferAPIRequest(ginCtx, info)
 		return
 	}
 
@@ -123,47 +117,6 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	if requestText != "" {
 		updateAggregatedRequest(ginCtx, attempts)
 	}
-}
-
-func deferAPIRequest(ginCtx *gin.Context, info UpstreamRequestLog) {
-	if ginCtx == nil {
-		return
-	}
-	var requests []logging.DeferredAPIRequest
-	if value, exists := ginCtx.Get(logging.DeferredAPIRequestContextKey); exists {
-		requests, _ = value.([]logging.DeferredAPIRequest)
-	}
-	index := len(requests) + 1
-	capturedInfo := info
-	capturedAt := time.Now()
-	capturedBytes, _ := ginCtx.Get(deferredAPIRequestBytesKey)
-	bytesUsed, _ := capturedBytes.(int)
-	remaining := maxDeferredAPIRequestBodyBytes - bytesUsed
-	if remaining < 0 {
-		remaining = 0
-	}
-	captureLength := len(info.Body)
-	if captureLength > remaining {
-		captureLength = remaining
-	}
-	capturedInfo.Body = bytes.Clone(info.Body[:captureLength])
-	bodyEmpty := len(info.Body) == 0
-	bodyTruncated := captureLength < len(info.Body)
-	ginCtx.Set(deferredAPIRequestBytesKey, bytesUsed+captureLength)
-	requests = append(requests, func() []byte {
-		builder := newAPIRequestLogBuilder(index, capturedInfo, capturedAt)
-		if bodyEmpty {
-			builder.WriteString("<empty>")
-		} else {
-			builder.Write(capturedInfo.Body)
-			if bodyTruncated {
-				builder.WriteString(fmt.Sprintf("\n[API REQUEST BODY TRUNCATED: captured first %d bytes]", captureLength))
-			}
-		}
-		builder.WriteString("\n\n")
-		return []byte(builder.String())
-	})
-	ginCtx.Set(logging.DeferredAPIRequestContextKey, requests)
 }
 
 func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.Time) *strings.Builder {

@@ -129,6 +129,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 
 	// Create gin engine
 	engine := gin.New()
+	_ = engine.SetTrustedProxies(nil)
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}

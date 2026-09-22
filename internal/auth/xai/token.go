@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/privatefile"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -42,7 +43,7 @@ func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "xai"
 	ts.AuthKind = "oauth"
-	if errMkdirAll := os.MkdirAll(filepath.Dir(authFilePath), 0o700); errMkdirAll != nil {
+	if errMkdirAll := privatefile.MkdirAll(filepath.Dir(authFilePath)); errMkdirAll != nil {
 		return fmt.Errorf("xai token storage: create directory: %w", errMkdirAll)
 	}
 
@@ -51,7 +52,7 @@ func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("xai token storage: merge metadata: %w", errMerge)
 	}
 
-	file, err := os.Create(authFilePath)
+	file, err := privatefile.Open(authFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("xai token storage: create token file: %w", err)
 	}

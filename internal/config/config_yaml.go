@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/privatefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -62,7 +63,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	normalizeCollectionNodeStyles(original.Content[0])
 
 	// Write back.
-	f, err := os.Create(configFile)
+	f, err := privatefile.Open(configFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return err
 	}
@@ -114,7 +115,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 			node = next
 		}
 	}
-	f, err := os.Create(configFile)
+	f, err := privatefile.Open(configFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return err
 	}
@@ -341,6 +342,33 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 
+	// These exposure controls have non-zero runtime defaults. Explicit opt-outs
+	// must survive saves even when the keys were absent from the original YAML.
+	fullPath := strings.Join(path, ".")
+	if node != nil && node.Kind == yaml.ScalarNode {
+		switch fullPath {
+		case "host":
+			if node.Tag == "!!str" && node.Value == "" {
+				return false
+			}
+		case "remote-management.disable-control-panel", "remote-management.disable-auto-update-panel":
+			if node.Tag == "!!bool" && node.Value == "false" {
+				return false
+			}
+		}
+	}
+	if fullPath == "remote-management" && node != nil && node.Kind == yaml.MappingNode {
+		for _, key := range []string{"disable-control-panel", "disable-auto-update-panel"} {
+			idx := findMapKeyIndex(node, key)
+			if idx >= 0 && idx+1 < len(node.Content) {
+				value := node.Content[idx+1]
+				if value != nil && value.Kind == yaml.ScalarNode && value.Tag == "!!bool" && value.Value == "false" {
+					return false
+				}
+			}
+		}
+	}
+
 	// First check if it's a zero value
 	if isZeroValueNode(node) {
 		return true
@@ -350,8 +378,6 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if len(path) == 0 {
 		return false
 	}
-
-	fullPath := strings.Join(path, ".")
 
 	// Check string defaults
 	if node.Kind == yaml.ScalarNode && node.Tag == "!!str" {

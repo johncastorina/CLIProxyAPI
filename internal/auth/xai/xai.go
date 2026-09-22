@@ -52,10 +52,13 @@ func ValidateOAuthEndpoint(rawURL string, field string) (string, error) {
 	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return "", fmt.Errorf("xai discovery %s is invalid: %w", field, err)
+		return "", fmt.Errorf("xai discovery %s is invalid", field)
 	}
 	if parsed.Scheme != "https" {
-		return "", fmt.Errorf("xai discovery %s must use https: %q", field, rawURL)
+		return "", fmt.Errorf("xai discovery %s must use https", field)
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("xai discovery %s must not contain userinfo", field)
 	}
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	if host != "x.ai" && !strings.HasSuffix(host, ".x.ai") {
@@ -141,7 +144,7 @@ func (a *XAIAuth) RequestDeviceCode(ctx context.Context, deviceAuthorizationEndp
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.doOAuthRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("xai device code request failed: %w", err)
 	}
@@ -276,7 +279,7 @@ func (a *XAIAuth) exchangeDeviceCode(ctx context.Context, tokenEndpoint, deviceC
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.doOAuthRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("xai device token request failed: %w", err), interval, false
 	}
@@ -355,7 +358,11 @@ func (a *XAIAuth) RefreshTokens(ctx context.Context, refreshToken, tokenEndpoint
 		}
 		tokenEndpoint = discovery.TokenEndpoint
 	}
-	tokenEndpoint = strings.TrimSpace(tokenEndpoint)
+	validatedTokenEndpoint, errValidate := ValidateOAuthEndpoint(tokenEndpoint, "token_endpoint")
+	if errValidate != nil {
+		return nil, fmt.Errorf("xai token refresh: %w", errValidate)
+	}
+	tokenEndpoint = validatedTokenEndpoint
 
 	result, err, _ := xaiRefreshGroup.Do(refreshToken, func() (interface{}, error) {
 		return a.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken, tokenEndpoint)
@@ -389,7 +396,7 @@ func (a *XAIAuth) postTokenForm(ctx context.Context, tokenEndpoint string, form 
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.doOAuthRequest(req)
 	if err != nil {
 		return nil, fmt.Errorf("xai token request failed: %w", err)
 	}
@@ -420,6 +427,17 @@ func (a *XAIAuth) postTokenForm(ctx context.Context, tokenEndpoint string, form 
 	}
 	email, subject := parseJWTIdentity(payload.IDToken)
 	return buildTokenData(payload.AccessToken, payload.RefreshToken, payload.IDToken, payload.TokenType, payload.ExpiresIn, email, subject), nil
+}
+
+func (a *XAIAuth) doOAuthRequest(req *http.Request) (*http.Response, error) {
+	if a == nil || a.httpClient == nil {
+		return nil, fmt.Errorf("xai oauth request: HTTP client is unavailable")
+	}
+	client := *a.httpClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client.Do(req)
 }
 
 // CreateTokenStorage converts an auth bundle into persistable storage.

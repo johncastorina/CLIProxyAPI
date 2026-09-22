@@ -349,7 +349,7 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) 
 	}
 }
 
-func TestFileRequestLogger_HomeEnabled_DoesNotForwardForcedErrorLogsWhenRequestLogDisabled(t *testing.T) {
+func TestFileRequestLogger_HomeEnabled_DoesNotPersistForcedErrorLogsWhenRequestLogDisabled(t *testing.T) {
 	original := currentHomeRequestLogClient
 	defer func() {
 		currentHomeRequestLogClient = original
@@ -394,18 +394,8 @@ func TestFileRequestLogger_HomeEnabled_DoesNotForwardForcedErrorLogsWhenRequestL
 	if errRead != nil {
 		t.Fatalf("failed to read logs dir: %v", errRead)
 	}
-	found := false
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		if entry.Name() != "" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected local forced error log file when request-log disabled")
+	if len(entries) != 0 {
+		t.Fatalf("request-log=false persisted %d forced conversation log entries", len(entries))
 	}
 }
 

@@ -1,6 +1,7 @@
 package management
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,4 +86,137 @@ func TestMiddlewareSetsSupportPluginHeader(t *testing.T) {
 			t.Fatalf("X-CPA-SUPPORT-PLUGIN = %q, want %q", got, pluginhost.SupportPluginHeaderValue())
 		}
 	})
+}
+
+func TestMiddlewareRejectsRemoteSocketSpoofingLocalhostForwardedHeader(t *testing.T) {
+	h := &Handler{
+		cfg:            &config.Config{},
+		failedAttempts: make(map[string]*attemptInfo),
+		envSecret:      "test-secret",
+	}
+	engine := gin.New()
+	engine.GET("/v0/management/config", h.Middleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	req.Header.Set("X-Management-Key", "test-secret")
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestMiddlewareAcceptsLocalPasswordFromLocalSocket(t *testing.T) {
+	h := &Handler{
+		cfg:            &config.Config{},
+		failedAttempts: make(map[string]*attemptInfo),
+		localPassword:  "tui-local-password",
+	}
+	engine := gin.New()
+	engine.GET("/v0/management/config", h.Middleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Management-Key", "tui-local-password")
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+}
+
+func TestMiddlewareDoesNotAcceptLocalPasswordFromRemoteSocket(t *testing.T) {
+	h := &Handler{
+		cfg: &config.Config{RemoteManagement: config.RemoteManagement{
+			AllowRemote: true,
+		}},
+		failedAttempts: make(map[string]*attemptInfo),
+		localPassword:  "tui-local-password",
+	}
+	engine := gin.New()
+	engine.GET("/v0/management/config", h.Middleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	req.Header.Set("X-Real-IP", "127.0.0.1")
+	req.Header.Set("X-Management-Key", "tui-local-password")
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestMiddlewareRemoteAllowStillRequiresManagementKey(t *testing.T) {
+	h := &Handler{
+		cfg: &config.Config{RemoteManagement: config.RemoteManagement{
+			AllowRemote: true,
+		}},
+		failedAttempts: make(map[string]*attemptInfo),
+		envSecret:      "test-secret",
+	}
+	engine := gin.New()
+	engine.GET("/v0/management/config", h.Middleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}
+
+func TestMiddlewareThrottleUsesRemoteSocketPeer(t *testing.T) {
+	h := &Handler{
+		cfg: &config.Config{RemoteManagement: config.RemoteManagement{
+			AllowRemote: true,
+		}},
+		failedAttempts: make(map[string]*attemptInfo),
+		envSecret:      "test-secret",
+	}
+	engine := gin.New()
+	engine.GET("/v0/management/config", h.Middleware(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+
+	for i := 0; i < 5; i++ {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+		req.RemoteAddr = "192.0.2.10:12345"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i+1))
+		req.Header.Set("X-Real-IP", fmt.Sprintf("203.0.113.%d", i+1))
+		req.Header.Set("X-Management-Key", "wrong-secret")
+		engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d, want %d", i+1, rec.Code, http.StatusUnauthorized)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.RemoteAddr = "192.0.2.10:12345"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	req.Header.Set("X-Real-IP", "127.0.0.1")
+	req.Header.Set("X-Management-Key", "test-secret")
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "IP banned") {
+		t.Fatalf("status = %d, body=%s; want socket peer ban", rec.Code, rec.Body.String())
+	}
 }

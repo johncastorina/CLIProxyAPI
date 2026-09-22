@@ -35,10 +35,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if err != nil {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
-				// Missing and optional: return empty config (cloud deploy standby).
-				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-				cfg.NormalizePluginsConfig()
-				return cfg, nil
+				// Missing and optional: return a safe config (cloud deploy standby).
+				return newOptionalConfig(), nil
 			}
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -46,16 +44,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(bytes.TrimSpace(data)) == 0 {
-		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-		cfg.NormalizePluginsConfig()
-		return cfg, nil
+		return newOptionalConfig(), nil
 	}
 
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
 		if optional {
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			return cfgOptional, nil
+			return newOptionalConfig(), nil
 		}
 		return nil, errValidate
 	}
@@ -63,7 +57,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Unmarshal the YAML data into the Config struct.
 	var cfg Config
 	// Set defaults before unmarshal so that absent keys keep defaults.
-	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
+	cfg.Host = "127.0.0.1"
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
@@ -80,13 +74,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Discovery.ServiceType = DefaultDiscoveryServiceType
 	cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.RemoteManagement.DisableControlPanel = true
+	cfg.RemoteManagement.DisableAutoUpdatePanel = true
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			return cfgOptional, nil
+			return newOptionalConfig(), nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
@@ -200,4 +194,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+func newOptionalConfig() *Config {
+	cfg := &Config{
+		Host:               "127.0.0.1",
+		CredentialInFlight: DefaultCredentialInFlightConfig(),
+		RemoteManagement: RemoteManagement{
+			DisableControlPanel:    true,
+			DisableAutoUpdatePanel: true,
+		},
+	}
+	cfg.NormalizePluginsConfig()
+	return cfg
 }

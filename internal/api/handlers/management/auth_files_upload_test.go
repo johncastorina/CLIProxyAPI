@@ -7,6 +7,10 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -116,5 +120,68 @@ func TestUploadAuthFile_InvokesPostAuthPersistHook(t *testing.T) {
 	}
 	if hookedAuth.ID != "codex-user@example.com.json" {
 		t.Fatalf("hooked auth ID = %q, want codex-user@example.com.json", hookedAuth.ID)
+	}
+}
+
+func TestUploadAuthFileTightensExistingFilePermissions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authDir := t.TempDir()
+	fileName := "codex-existing.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","access_token":"old"}`), 0o644); errWrite != nil {
+		t.Fatalf("write existing auth file: %v", errWrite)
+	}
+	if errChmod := os.Chmod(filePath, 0o644); errChmod != nil {
+		t.Fatalf("chmod existing auth file: %v", errChmod)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, coreauth.NewManager(nil, nil, nil))
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files?name="+fileName, strings.NewReader(`{"type":"codex","access_token":"new"}`))
+	h.UploadAuthFile(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	info, errStat := os.Stat(filePath)
+	if errStat != nil {
+		t.Fatalf("stat uploaded auth file: %v", errStat)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("uploaded auth file permissions = %04o, want 0600", got)
+	}
+}
+
+func TestUploadAuthFileRejectsSymlinkDestination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not reliably available on Windows test hosts")
+	}
+	gin.SetMode(gin.TestMode)
+	authDir := t.TempDir()
+	targetPath := filepath.Join(authDir, "target.json")
+	fileName := "codex-link.json"
+	linkPath := filepath.Join(authDir, fileName)
+	original := []byte(`{"type":"codex","access_token":"original"}`)
+	if errWrite := os.WriteFile(targetPath, original, 0o600); errWrite != nil {
+		t.Fatalf("write symlink target: %v", errWrite)
+	}
+	if errLink := os.Symlink(targetPath, linkPath); errLink != nil {
+		t.Fatalf("create symlink: %v", errLink)
+	}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, coreauth.NewManager(nil, nil, nil))
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files?name="+fileName, strings.NewReader(`{"type":"codex","access_token":"replacement"}`))
+	h.UploadAuthFile(ctx)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	got, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("read symlink target: %v", errRead)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("symlink target changed to %q, want %q", got, original)
 	}
 }

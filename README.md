@@ -1,3 +1,5 @@
+> **Local security hardening fork:** This fork targets a loopback-only, source-built setup. See [local use and security boundaries](docs/security/local-use.md) before connecting accounts. The desktop wrapper and upstream release binaries are not covered by these changes.
+
 # CLI Proxy API
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
